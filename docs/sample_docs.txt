@@ -1,0 +1,112 @@
+# DocSearch Mobile App - User Guide
+
+## Overview
+DocSearch is a mobile application that allows you to scan, index, and search documents using AI-powered OCR and semantic search. The app runs on Android devices and uses on-device machine learning models for privacy.
+
+## Features
+
+### Document Scanning
+- Capture documents using your phone's camera
+- Import images from your gallery
+- Automatic text extraction using OCR (Optical Character Recognition)
+- Support for multiple languages including English
+
+### Document Indexing
+- Documents are automatically indexed after scanning
+- Index is stored locally on your device
+- No cloud upload required - your documents stay private
+
+### Semantic Search
+- Search documents using natural language queries
+- AI-powered understanding of document content
+- Results ranked by relevance using a neural reranker
+- Keyword fallback when semantic models are loading
+
+### Chat with Documentation
+- Ask questions about your indexed documents
+- AI assistant provides answers based on document content
+- Conversation history is saved locally
+
+## Getting Started
+
+1. Install the app on your Android device
+2. Grant camera and storage permissions when prompted
+3. Wait for AI models to download (first launch only)
+4. Start scanning or importing documents
+
+## Scanning Documents
+
+To scan a new document:
+1. Tap the camera icon on the Documents tab
+2. Point your camera at the document
+3. The app will automatically detect and capture the document
+4. Text will be extracted automatically
+
+To import from gallery:
+1. Tap the gallery icon
+2. Select one or more images
+3. Documents will be processed and indexed
+
+## Searching Documents
+
+To search your documents:
+1. Enter your search query in the search box
+2. Tap the search button
+3. Results will show matching documents ranked by relevance
+4. Tap a result to view the full document
+
+Search tips:
+- Use natural language queries like "invoice from January"
+- The AI understands context and meaning, not just keywords
+- More specific queries give better results
+
+## Chat Feature
+
+The Chat tab allows you to have a conversation about your documents:
+1. Go to the Chat tab
+2. Type your question
+3. The AI will search relevant documents and provide an answer
+4. Follow-up questions maintain conversation context
+
+## Settings
+
+Access settings by tapping the gear icon:
+- LLM Endpoint: URL of your AI server
+- API Key: Authentication key for the AI server
+
+## Troubleshooting
+
+### Models not loading
+- Ensure you have a stable internet connection for first download
+- Models are cached after first download
+- Total model size is approximately 100MB
+
+### Search not finding documents
+- Make sure documents are fully indexed (check the document count)
+- Try different search terms
+- Check if OCR extracted text correctly
+
+### Chat not responding
+- Verify your API endpoint and key are correct
+- Check your internet connection
+- The AI server may be temporarily unavailable
+
+## Privacy
+
+- All document processing happens on your device
+- No documents are uploaded to external servers
+- Chat feature sends only your questions to the configured AI server
+- Conversation history is stored locally
+
+## Technical Specifications
+
+- Minimum Android version: 7.0 (API 24)
+- Recommended RAM: 4GB or more
+- Storage: 500MB for app and models
+- OCR Model: EasyOCR English
+- Embedding Model: GTE-Small (384 dimensions)
+- Reranker: MS-MARCO MiniLM
+
+## Support
+
+For issues or feature requests, contact support@docsearch.app
