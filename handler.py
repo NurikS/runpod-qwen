@@ -2,10 +2,11 @@ import runpod
 import logging
 import os
 import numpy as np
+import faiss
 from pydantic import BaseModel, ValidationError
 from transformers import pipeline, AutoTokenizer, AutoModel
 import torch
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -15,6 +16,7 @@ DOCS_DIR = "/docs"
 CHUNK_SIZE = 500
 CHUNK_OVERLAP = 50
 TOP_K = 3
+EMBEDDING_DIM = 384  # all-MiniLM-L6-v2 dimension
 
 # ===== Load Models =====
 logger.info("Loading LLM...")
@@ -26,7 +28,7 @@ embed_model = AutoModel.from_pretrained("sentence-transformers/all-MiniLM-L6-v2"
 
 # ===== Document Store =====
 doc_chunks: List[str] = []
-doc_embeddings: np.ndarray = None
+faiss_index: Optional[faiss.IndexFlatIP] = None  # Inner product (cosine sim for normalized vectors)
 
 
 def mean_pooling(model_output, attention_mask):
@@ -61,7 +63,7 @@ def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
 
 def load_documents():
     """Load and index all documents from DOCS_DIR."""
-    global doc_chunks, doc_embeddings
+    global doc_chunks, faiss_index
     
     if not os.path.exists(DOCS_DIR):
         logger.warning(f"Docs directory {DOCS_DIR} does not exist")
@@ -97,27 +99,32 @@ def load_documents():
         doc_chunks = all_chunks
         logger.info(f"Generating embeddings for {len(doc_chunks)} chunks...")
         embeddings = [get_embedding(chunk) for chunk in doc_chunks]
-        doc_embeddings = np.array(embeddings)
-        logger.info(f"Document index ready: {len(doc_chunks)} chunks")
+        embeddings_array = np.array(embeddings).astype('float32')
+        
+        # Normalize for cosine similarity via inner product
+        faiss.normalize_L2(embeddings_array)
+        
+        # Create FAISS index
+        faiss_index = faiss.IndexFlatIP(EMBEDDING_DIM)
+        faiss_index.add(embeddings_array)
+        
+        logger.info(f"FAISS index ready: {faiss_index.ntotal} vectors")
     else:
         logger.warning("No documents found to index")
 
 
 def search_docs(query: str, top_k: int = TOP_K) -> List[Tuple[str, float]]:
-    """Search documents and return top-k relevant chunks."""
-    if doc_embeddings is None or len(doc_chunks) == 0:
+    """Search documents and return top-k relevant chunks using FAISS."""
+    if faiss_index is None or len(doc_chunks) == 0:
         return []
     
-    query_embedding = get_embedding(query)
+    query_embedding = get_embedding(query).astype('float32').reshape(1, -1)
+    faiss.normalize_L2(query_embedding)
     
-    # Cosine similarity
-    similarities = np.dot(doc_embeddings, query_embedding) / (
-        np.linalg.norm(doc_embeddings, axis=1) * np.linalg.norm(query_embedding) + 1e-9
-    )
+    # FAISS search
+    scores, indices = faiss_index.search(query_embedding, min(top_k, len(doc_chunks)))
     
-    top_indices = np.argsort(similarities)[-top_k:][::-1]
-    
-    results = [(doc_chunks[i], float(similarities[i])) for i in top_indices]
+    results = [(doc_chunks[idx], float(score)) for idx, score in zip(indices[0], scores[0]) if idx >= 0]
     return results
 
 

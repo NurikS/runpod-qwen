@@ -1,6 +1,6 @@
 FROM runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404
 
-RUN pip install runpod transformers sentence-transformers PyMuPDF numpy pydantic
+RUN pip install runpod transformers sentence-transformers PyMuPDF numpy pydantic faiss-cpu
 
 # Create docs directory
 RUN mkdir -p /docs
