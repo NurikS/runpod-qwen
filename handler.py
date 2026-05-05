@@ -1,12 +1,14 @@
 import runpod
 import logging
 import os
+import io
 import numpy as np
 import faiss
 from pydantic import BaseModel, ValidationError
-from transformers import pipeline, AutoTokenizer, AutoModel
+from transformers import pipeline, AutoTokenizer, AutoModel, BlipProcessor, BlipForConditionalGeneration
 import torch
 from typing import List, Tuple, Optional
+from PIL import Image
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -17,6 +19,7 @@ CHUNK_SIZE = 500
 CHUNK_OVERLAP = 50
 TOP_K = 3
 EMBEDDING_DIM = 384  # all-MiniLM-L6-v2 dimension
+MIN_IMAGE_SIZE = 100  # Minimum image dimension to process (skip tiny icons)
 
 # ===== Load Models =====
 logger.info("Loading LLM...")
@@ -25,6 +28,10 @@ pipe = pipeline("text-generation", model="Qwen/Qwen3-0.6B")
 logger.info("Loading embedding model...")
 embed_tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
 embed_model = AutoModel.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
+
+logger.info("Loading BLIP image captioning model...")
+blip_processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+blip_model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
 
 # ===== Document Store =====
 doc_chunks: List[str] = []
@@ -61,6 +68,51 @@ def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
     return chunks
 
 
+def caption_image(image: Image.Image) -> str:
+    """Generate a caption for an image using BLIP."""
+    try:
+        inputs = blip_processor(image, return_tensors="pt")
+        with torch.no_grad():
+            output = blip_model.generate(**inputs, max_length=50)
+        caption = blip_processor.decode(output[0], skip_special_tokens=True)
+        return caption
+    except Exception as e:
+        logger.error(f"Failed to caption image: {e}")
+        return ""
+
+
+def extract_images_from_pdf(filepath: str) -> List[Tuple[Image.Image, int]]:
+    """Extract images from PDF, returns list of (image, page_number)."""
+    import fitz
+    images = []
+    
+    try:
+        doc = fitz.open(filepath)
+        for page_num, page in enumerate(doc):
+            image_list = page.get_images(full=True)
+            
+            for img_index, img_info in enumerate(image_list):
+                xref = img_info[0]
+                try:
+                    base_image = doc.extract_image(xref)
+                    image_bytes = base_image["image"]
+                    
+                    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+                    
+                    # Skip tiny images (likely icons or decorations)
+                    if image.width >= MIN_IMAGE_SIZE and image.height >= MIN_IMAGE_SIZE:
+                        images.append((image, page_num + 1))
+                        
+                except Exception as e:
+                    logger.warning(f"Failed to extract image {img_index} from page {page_num}: {e}")
+                    
+        doc.close()
+    except Exception as e:
+        logger.error(f"Failed to extract images from {filepath}: {e}")
+    
+    return images
+
+
 def load_documents():
     """Load and index all documents from DOCS_DIR."""
     global doc_chunks, faiss_index
@@ -78,6 +130,10 @@ def load_documents():
             if filename.endswith('.txt'):
                 with open(filepath, 'r', encoding='utf-8') as f:
                     text = f.read()
+                chunks = chunk_text(text)
+                logger.info(f"Loaded {filename}: {len(chunks)} text chunks")
+                all_chunks.extend(chunks)
+                
             elif filename.endswith('.pdf'):
                 import fitz  # PyMuPDF
                 doc = fitz.open(filepath)
@@ -85,12 +141,26 @@ def load_documents():
                 for page in doc:
                     text += page.get_text()
                 doc.close()
+                
+                # Process text chunks
+                chunks = chunk_text(text)
+                logger.info(f"Loaded {filename}: {len(chunks)} text chunks")
+                all_chunks.extend(chunks)
+                
+                # Extract and caption images
+                images = extract_images_from_pdf(filepath)
+                logger.info(f"Found {len(images)} images in {filename}")
+                
+                for img, page_num in images:
+                    caption = caption_image(img)
+                    if caption:
+                        # Create a chunk from the image caption with metadata
+                        image_chunk = f"[Image on page {page_num}]: {caption}"
+                        all_chunks.append(image_chunk)
+                        logger.info(f"  Page {page_num}: {caption[:50]}...")
+                
             else:
                 continue
-            
-            chunks = chunk_text(text)
-            logger.info(f"Loaded {filename}: {len(chunks)} chunks")
-            all_chunks.extend(chunks)
             
         except Exception as e:
             logger.error(f"Failed to load {filename}: {e}")
