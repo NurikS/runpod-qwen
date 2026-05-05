@@ -2,12 +2,13 @@ import runpod
 import logging
 import os
 import io
+import base64
 import numpy as np
 import faiss
 from pydantic import BaseModel, ValidationError
 from transformers import pipeline, AutoTokenizer, AutoModel, BlipProcessor, BlipForConditionalGeneration
 import torch
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 from PIL import Image
 
 logging.basicConfig(level=logging.INFO)
@@ -35,6 +36,7 @@ blip_model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image
 
 # ===== Document Store =====
 doc_chunks: List[str] = []
+chunk_images: Dict[int, str] = {}  # Maps chunk index to base64 image data
 faiss_index: Optional[faiss.IndexFlatIP] = None  # Inner product (cosine sim for normalized vectors)
 
 
@@ -113,15 +115,23 @@ def extract_images_from_pdf(filepath: str) -> List[Tuple[Image.Image, int]]:
     return images
 
 
+def image_to_base64(image: Image.Image) -> str:
+    """Convert PIL Image to base64 string."""
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=85)
+    return base64.b64encode(buffer.getvalue()).decode('utf-8')
+
+
 def load_documents():
     """Load and index all documents from DOCS_DIR."""
-    global doc_chunks, faiss_index
+    global doc_chunks, chunk_images, faiss_index
     
     if not os.path.exists(DOCS_DIR):
         logger.warning(f"Docs directory {DOCS_DIR} does not exist")
         return
     
     all_chunks = []
+    image_data = {}  # Temporary storage for image base64
     
     for filename in os.listdir(DOCS_DIR):
         filepath = os.path.join(DOCS_DIR, filename)
@@ -154,9 +164,13 @@ def load_documents():
                 for img, page_num in images:
                     caption = caption_image(img)
                     if caption:
+                        # Store the chunk index before adding
+                        chunk_idx = len(all_chunks)
                         # Create a chunk from the image caption with metadata
                         image_chunk = f"[Image on page {page_num}]: {caption}"
                         all_chunks.append(image_chunk)
+                        # Store the base64 image data
+                        image_data[chunk_idx] = image_to_base64(img)
                         logger.info(f"  Page {page_num}: {caption[:50]}...")
                 
             else:
@@ -167,6 +181,7 @@ def load_documents():
     
     if all_chunks:
         doc_chunks = all_chunks
+        chunk_images = image_data  # Store image data globally
         logger.info(f"Generating embeddings for {len(doc_chunks)} chunks...")
         embeddings = [get_embedding(chunk) for chunk in doc_chunks]
         embeddings_array = np.array(embeddings).astype('float32')
@@ -178,13 +193,14 @@ def load_documents():
         faiss_index = faiss.IndexFlatIP(EMBEDDING_DIM)
         faiss_index.add(embeddings_array)
         
-        logger.info(f"FAISS index ready: {faiss_index.ntotal} vectors")
+        logger.info(f"FAISS index ready: {faiss_index.ntotal} vectors, {len(chunk_images)} images")
     else:
         logger.warning("No documents found to index")
 
 
-def search_docs(query: str, top_k: int = TOP_K) -> List[Tuple[str, float]]:
-    """Search documents and return top-k relevant chunks using FAISS."""
+def search_docs(query: str, top_k: int = TOP_K) -> List[Tuple[int, str, float]]:
+    """Search documents and return top-k relevant chunks using FAISS.
+    Returns list of (chunk_index, chunk_text, score)."""
     if faiss_index is None or len(doc_chunks) == 0:
         return []
     
@@ -194,7 +210,7 @@ def search_docs(query: str, top_k: int = TOP_K) -> List[Tuple[str, float]]:
     # FAISS search
     scores, indices = faiss_index.search(query_embedding, min(top_k, len(doc_chunks)))
     
-    results = [(doc_chunks[idx], float(score)) for idx, score in zip(indices[0], scores[0]) if idx >= 0]
+    results = [(int(idx), doc_chunks[idx], float(score)) for idx, score in zip(indices[0], scores[0]) if idx >= 0]
     return results
 
 
@@ -220,9 +236,38 @@ def handler(event):
         # RAG: Search relevant documents
         relevant_docs = search_docs(query)
         
+        # Collect images from matched chunks
+        images = []
+        for idx, doc, score in relevant_docs:
+            if idx in chunk_images:
+                # Extract page number from chunk text
+                page_match = doc.split("]")[0].replace("[Image on page ", "")
+                try:
+                    page_num = int(page_match)
+                except:
+                    page_num = 0
+                images.append({
+                    "data": chunk_images[idx],
+                    "page": page_num,
+                    "caption": doc.split("]: ", 1)[-1] if "]: " in doc else doc
+                })
+        
         if relevant_docs:
-            context = "\n\n".join([f"[Relevant excerpt {i+1}]:\n{doc}" for i, (doc, score) in enumerate(relevant_docs)])
-            prompt = f"""Based on the following documentation excerpts, answer the user's question.
+            context = "\n\n".join([f"[Relevant excerpt {i+1}]:\n{doc}" for i, (idx, doc, score) in enumerate(relevant_docs)])
+            
+            # If there are images, instruct LLM to explain them
+            if images:
+                prompt = f"""Based on the following documentation excerpts (including image descriptions), answer the user's question.
+The user will see the actual images displayed above your response, so explain what the diagrams show and how they relate to the question.
+
+Documentation:
+{context}
+
+Question: {query}
+
+First explain what the relevant diagram(s) show, then answer the question based on the documentation."""
+            else:
+                prompt = f"""Based on the following documentation excerpts, answer the user's question.
 
 Documentation:
 {context}
@@ -237,8 +282,8 @@ Answer based on the documentation above. If the documentation doesn't contain re
         result = pipe(messages)
         response = result[0]["generated_text"][-1]["content"]
         
-        logger.info(f"Generated response for: {query[:50]}... (found {len(relevant_docs)} relevant chunks)")
-        return {"response": response}
+        logger.info(f"Generated response for: {query[:50]}... (found {len(relevant_docs)} chunks, {len(images)} images)")
+        return {"response": response, "images": images}
         
     except Exception as e:
         logger.error(f"Inference error: {e}")
